@@ -66,6 +66,12 @@ platform_do_upgrade() {
 	local board=$(board_name)
 
 	case "$board" in
+	kst,wf3000a)
+		CI_UBIPART="ubi"
+		CI_KERNPART="kernel"
+		CI_ROOTPART="rootfs"
+		nand_do_upgrade "$1"
+		;;
 	netcore,n60-pro|\
 	tplink,tl-xdr4288|\
     tplink,tl-xdr6086|\
