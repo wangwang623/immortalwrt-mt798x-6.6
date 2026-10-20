@@ -137,7 +137,7 @@ jobs:
 
           # 该 .dat 只有 first_card_name=MT7981 时才会被装上机
           for sym in 'CONFIG_first_card=y' 'CONFIG_first_card_name="MT7981"'; do
-            grep -qxF "$sym" "$GITHUB_WORKSPACE/config/wf3000a.config" || {
+            grep -qxF "$sym" "$GITHUB_WORKSPACE/defconfig/wf3000a.config" || {
               echo "::error::config 缺少 $sym —— l1profile.dat 不会被安装" >&2
               exit 1; }
           done
@@ -181,7 +181,7 @@ jobs:
               return {k: v for k, v in d.items() if PAT.match(k)}
 
           up = load('defconfig/mt7981-ax3000.config')
-          my = load('${{ github.workspace }}/config/wf3000a.config')
+          my = load('${{ github.workspace }}/defconfig/wf3000a.config')
           if not up:
               print("::error::上游 defconfig/mt7981-ax3000.config 缺失或为空")
               sys.exit(1)
@@ -213,7 +213,7 @@ jobs:
       - name: Load and validate configuration
         working-directory: ${{ runner.temp }}/wf3000a-build/openwrt
         run: |
-          cp "$GITHUB_WORKSPACE/config/wf3000a.config" .config
+          cp "$GITHUB_WORKSPACE/defconfig/wf3000a.config" .config
           make defconfig
 
           fail() {
