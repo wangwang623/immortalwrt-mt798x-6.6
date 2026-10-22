@@ -13,23 +13,29 @@ Default login address: http://192.168.6.1 or http://immortalwrt.lan, username: _
 >
 > 上游：<https://github.com/padavanonly/immortalwrt-mt798x-6.6>
 >
-> 本 fork 在 `openwrt-24.10-6.6` 分支上**新增了 KST WF3000A 的板级支持**，
-> 其余内容与上游完全一致。**源码本身未做任何其他修改。**
+> 本 fork 在 `openwrt-24.10-6.6` 分支上做了两件事：
+>
+> 1. **新增 KST WF3000A 板级支持**（源码改动 5 处，见第一～七节）
+> 2. **新增 Redmi AX6000 编译流程**（**源码零改动**，上游已支持，见[第八节](#八redmi-ax6000)）
+>
+> 除上述外，其余内容与上游完全一致。
 >
 > ### 目录
 >
-> | 章节 | 内容 |
-> |---|---|
-> | [一](#一这个-fork-改了什么) | 这个 fork 改了什么（5 处） |
-> | [二](#二硬件与分区布局) | 硬件与分区布局 |
-> | [三](#三mac-地址方案) | MAC 地址方案 |
-> | [四](#四无线mtk-闭源驱动) | 无线：MTK 闭源驱动 |
-> | [五](#五已知限制) | 已知限制 |
-> | [六](#六本地验证改完自查) | 本地验证（改完自查） |
-> | [七](#七同步上游) | 同步上游 |
-> | [八](#八通用性与参考链接) | 通用性与参考链接 |
+> | 章节 | 内容 | 适用机型 |
+> |---|---|---|
+> | [一](#一这个-fork-改了什么) | 这个 fork 改了什么（5 处） | WF3000A |
+> | [二](#二硬件与分区布局) | 硬件与分区布局 | WF3000A |
+> | [三](#三mac-地址方案) | MAC 地址方案 | WF3000A |
+> | [四](#四无线mtk-闭源驱动) | 无线：MTK 闭源驱动 | **两机型共用** |
+> | [五](#五已知限制) | 已知限制 | **两机型共用** |
+> | [六](#六本地验证改完自查) | 本地验证（改完自查） | WF3000A |
+> | [七](#七同步上游) | 同步上游 | WF3000A |
+> | **[八](#八redmi-ax6000)** | **Redmi AX6000（零改动编译）** | **AX6000** |
+> | [九](#九通用性与参考链接) | 通用性与参考链接 | — |
 >
-> 只看固件怎么来的 → 直接跳到[第八节 · 参考链接](#八通用性与参考链接)。
+> 只用 AX6000 → 直接跳到[第八节](#八redmi-ax6000)。
+> 只看固件怎么来的 → 直接跳到[第九节 · 参考链接](#九通用性与参考链接)。
 
 ---
 
@@ -147,21 +153,85 @@ IMAGE_SIZE = 116736 - 1024 = 115712k
 - `0x0a` = `48:DA:35:50:70:F8`（5G 无线）
 - **`...:F5`（机身标签）在 factory 里不存在** —— 所以只能推算
 
-### 有线 MAC（第 3 处：`02_network`，第 246 行）
+### 最终布局（五个地址升序连续）
+
+| 用途 | 本机值 | 来源 |
+|---|---|---|
+| **LAN**（= 机身标签） | `...:F5` | 基准 = 2.4G − 2 |
+| **WAN** | `...:F6` | 基准 + 1 |
+| **label_mac** | `...:F5` | = LAN |
+| 2.4G 无线 | `...:F7` | factory `0x04` 直读 |
+| 5G 无线 | `...:F8` | factory `0x0a` 直读 |
+
+即 **LAN(F5) → WAN(F6) → 2.4G(F7) → 5G(F8)**，与 factory 里 `0x04`/`0x0a` 的排布自洽。
+
+> `label_mac`（写进 `/etc/config/system` 的 `label_macaddr`）是 LuCI 状态页显示的
+> "设备身份"，取 LAN 是上游主流做法（14 处赋值里 4 处取 `lan_mac`、4 处取 `wan_mac`）。
+
+### 有线 MAC（第 3 处：`02_network`）
 
 ```sh
 kst,wf3000a)
-	base_mac=$(mtd_get_mac_binary factory 4)   # 基准 = factory 0x04
-	lan_mac=$(macaddr_add "$base_mac" -1)      # LAN = 基准 - 1
-	wan_mac=$(macaddr_add "$base_mac" -2)      # WAN = 基准 - 2
-	label_mac=$lan_mac
+	wlan_2g_mac=$(mtd_get_mac_binary factory 4)    # F7
+	wlan_5g_mac=$(mtd_get_mac_binary factory 10)   # F8
+
+	# 校验：排除空值 / 全 0 / 全 F，读不到就整体回退，绝不写脏值
+	case "$wlan_2g_mac" in
+		""|"00:00:00:00:00:00"|"ff:ff:ff:ff:ff:ff"|"FF:FF:FF:FF:FF:FF")
+			wlan_2g_mac=""; wlan_5g_mac="" ;;
+	esac
+
+	if [ -n "$wlan_2g_mac" ]; then
+		base_mac=$(macaddr_add "$wlan_2g_mac" -2)   # 基准 = F7 - 2 = F5
+		lan_mac=$base_mac                            # LAN = 基准 = 机身标签
+		label_mac=$lan_mac
+		wan_mac=$(macaddr_add "$base_mac" 1)         # WAN = F6
+	fi
+	# ↓ 抢先把无线 MAC 写进 .dat profile（见下方「为什么必须抢先写」）
 	;;
 ```
 
-本机结果：`LAN = ...:F6`，`WAN = ...:F5`（与机身标签一致）。
-
 > 这份源码只有 `macaddr_add`，**没有** `macaddr_sub`。
 > 传负数靠补码回绕实现减法，跨字节借位也正确（已实测 `...00:00:00 - 1 = ...ff:ff:ff`）。
+
+### 为什么必须"抢先写" `.dat`
+
+`mediatek_setup_macs()` 的**尾部**（`esac` 之后，所有机型共用）有这段：
+
+```sh
+if [ -n "$label_mac" ]; then
+	base_mac="$label_mac"        # ← 优先级最高，会覆盖分支内的 base_mac
+elif [ -n "$wan_mac" ]; then ...
+
+if [ -f ${b0dat} ] && ! grep -q "MacAddress=" ${b0dat}; then
+	b0mac="$(macaddr_add "$base_mac" 3)"    # 2.4G = label + 3
+	b1mac="$(macaddr_add "$base_mac" 4)"    # 5G   = label + 4
+fi
+```
+
+这是 padavanonly 上游**本来就有**的通用兜底（官方 OpenWrt 没有，因为它用开源 mt76）：
+不管有线 MAC 是 ASCII、二进制、eMMC 还是内核值，无线一律在它上面 `+3`/`+4`，
+保证五个地址不冲突——代价是**忽略 factory 里已有的无线 MAC**。
+
+**这就是 2.4G 默认显示 `F9` 的根因**：
+
+```
+F9 = label_mac(F6) + 3 = (F7 - 1) + 3 = F7 + 2
+```
+
+修法不是删掉 `+3/+4`（会影响 AX6000 等几十个机型），而是**让守卫命中**：
+
+```sh
+# 在 kst 分支内先写入正确值
+if [ -n "$wlan_2g_mac" ] && [ -f "$b0dat" ] && ! grep -q "MacAddress=" "$b0dat"; then
+	echo "MacAddress=$wlan_2g_mac" >> "$b0dat"    # F7
+fi
+if [ -n "$wlan_5g_mac" ] && [ -f "$b1dat" ] && ! grep -q "MacAddress=" "$b1dat"; then
+	echo "MacAddress=$wlan_5g_mac" >> "$b1dat"    # F8
+fi
+```
+
+`.dat` 里已有 `MacAddress=` → 尾部的 `! grep -q` 守卫跳过 → `+3/+4` 不执行。
 
 ### 无线 MAC（第 5 处：`mtwifi.sh`）
 
@@ -194,9 +264,19 @@ mtwifi_factory_mac() {
 
 **⚠️ 5G 的实际表现见[第五节](#五已知限制)。**
 
-### 效果
+### 效果与双保险
 
 每台机器读自己的 flash，**固件可以公开分发，不会与他人撞 MAC**。
+
+`02_network` 与 `mtwifi.sh` 现在**都读 `0x04`/`0x0a`**，不是冗余而是互补：
+
+| | 时机 | 写入目标 | 读不到时 |
+|---|---|---|---|
+| `02_network` | 首次开机 | `.dat` 文件 | 回退 eth0 默认值 |
+| `mtwifi.sh` | 生成无线配置 | `/etc/config/wireless` → mtwifi-cfg 覆盖 `.dat` | **不写 macaddr，保留前者写的值** |
+
+正常情况两者都写 F7/F8；万一 `mtwifi.sh` 读 factory 失败，
+它还留着 `02_network` 写进去的正确值。
 
 ---
 
@@ -236,14 +316,14 @@ CONFIG_PACKAGE_mtwifi-cfg=y
 
 ## 五、已知限制
 
-### ⚠️ 5G 的 MAC 恒为 `LAA(2.4G)`，改不了
+### ⚠️ 5G 的 MAC 恒为 `LAA(2.4G)`，改不了（两机型都有）
 
-实测现象：
+实测现象（WF3000A）：
 
 | 操作 | 5G 实际 BSSID |
 |---|---|
-| 默认 | `4A:DA:35:50:70:F9` |
-| 2.4G 设为 F7 后 | `4A:DA:35:50:70:F7` |
+| 修复前默认 | `4A:DA:35:50:70:F9` |
+| 修复后默认 | `4A:DA:35:50:70:F7` ← 跟着 2.4G 走 |
 | 5G 设为 `48:...:F8` | `4A:DA:35:50:70:F7`（**设置无效**） |
 | 5G 设为 `4A:...:F9` | `4A:DA:35:50:70:F7`（**设置无效**） |
 
@@ -260,7 +340,24 @@ b1.dat: MacAddress=48:DA:35:50:70:F8     ← 写进去了
 **影响**：`4A` 开头的 LAA 地址是 IEEE 802 规定的合法本地管理地址，
 不影响连接、速度、稳定性，也不冲突——**只是和机身标签对不上，管理时不好认**。
 
-**第 5 处改动的真实收益**：让 **2.4G 默认即为 F7**（刷完不用手动设一次）。
+**第 5 处改动的真实收益**：让 **2.4G 默认即为 F7**（不再是 F9，刷完不用手动设）。
+5G 的 `4A:F7` 依然是驱动行为，**本次改动不影响**。
+
+### ⚠️ AX6000 的 LAN MAC 上游没设
+
+`02_network` 里 AX6000 分支只给了 `wan_mac` 和 `label_mac`：
+
+```sh
+xiaomi,redmi-router-ax6000-stock|\
+xiaomi,redmi-router-ax6000-ubootmod)
+	wan_mac=$(mtd_get_mac_ascii Bdata ethaddr_wan)
+	label_mac=$wan_mac
+	;;                        # ← 没有 lan_mac
+```
+
+所以 `ucidef_set_interface_macaddr "lan"` 被跳过，LAN 的 MAC 会回落到
+网口默认值。**这是上游行为，不是本 fork 造成的**。若刷完发现 LAN MAC 与
+标签不符，需单独给 AX6000 补一行 `lan_mac` 推算。
 
 ### 生效时机
 
@@ -326,23 +423,226 @@ grep -c "mtwifi_factory_mac" .../mtwifi.sh                    # 3
 
 ---
 
-## 八、通用性与参考链接
+# 八、Redmi AX6000
+
+> **本机型源码零改动。** 上游 padavanonly 已完整支持，
+> 本 fork 只新增了**编译流程**（workflow + config），不动任何源码文件。
+
+## 8.1 为什么零改动就能编
+
+上游源码里机型定义、DTS、`02_network`、`platform.sh` 四件套**全都齐了**：
+
+| 环节 | 上游状态 |
+|---|---|
+| 机型定义 `filogic.mk` | ✅ 有 `xiaomi_redmi-router-ax6000-ubootmod` |
+| DTS | ✅ `mt7986a-xiaomi-redmi-router-ax6000-ubootmod.dts` |
+| `02_network` | ✅ 接口分组 + WAN MAC（第 176 / 320 行两处） |
+| `platform.sh` | ✅ `nand_do_upgrade` + `CI_UBIPART="ubi"` |
+
+所以只需要一份 config + 一个 workflow。
+
+## 8.2 分区布局：名字叫 ubootmod，实际是 hanwckf 110M
+
+这是最容易踩的坑。上游把机型命名为 `-ubootmod`，但**里面的布局跟官方
+OpenWrt 的 ubootmod 完全不同**：
+
+| | 本源码 `-ubootmod` | 官方 OpenWrt `ubootmod` | hanwckf U-Boot |
+|---|---|---|---|
+| ubi 起始 | `0x600000` | `0x580000` | `0x600000` |
+| ubi 大小 | **110 MiB** (`0x6e00000`) | 122.5 MiB (`0x7a80000`) | **110 MiB** |
+| crash / crash_log | **保留** | 删除 | **保留** |
+| NMBM | **开启** | 未开启 | **开启** |
+
+**四项与 hanwckf U-Boot 完全一致，与官方 ubootmod 四项全不同。**
+
+DTS 原文：
+
+```dts
+&spi_nand_flash {
+        mediatek,nmbm;                              /* ★ hanwckf uboot 必需 */
+        mediatek,bmt-max-ratio = <1>;
+        mediatek,bmt-max-reserved-blocks = <64>;
+};
+
+&partitions {
+	partition@580000 { label = "crash";     reg = <0x580000 0x40000>; read-only; };
+	partition@5c0000 { label = "crash_log"; reg = <0x5c0000 0x40000>; read-only; };
+	partition@600000 { label = "ubi";       reg = <0x600000 0x6e00000>; };
+};
+```
+
+**结论：直接编 `-ubootmod` 即可刷 hanwckf U-Boot，不用自建 110M 变体。**
+（24.10 只是把独立的 `-110m` 机型合并进了 `-ubootmod` 这个名字下，
+机型少了但支持没丢——名字骗了不少人。）
+
+## 8.3 `mt7986` 还是 `mt7986a`
+
+**两个都在用，分属不同层面，写错会编译失败：**
+
+| 层面 | 写法 | 位置 |
+|---|---|---|
+| 设备树 / 内核 | **`mt7986a`**（带 a） | DTS 文件名、`mt7986a.dtsi`、compatible |
+| OpenWrt 目标平台 | `mt7986` | `CONFIG_TARGET_mediatek_mt7986=y` |
+| MTK 闭源驱动 | **`MT7986`** | `CONFIG_MTK_CHIP_MT7986=y` 等 |
+| conninfra | `MT7986` | `CONFIG_MTK_CONNINFRA_APSOC_MT7986=y` |
+| WARP | `mt7986`（小写） | `CONFIG_WARP_CHIPSET="mt7986"` |
+
+`a` / `b` 是芯片封装变体（MT7986A / MT7986B），内核需要不同 `.dtsi`；
+**闭源驱动不区分变体**，按 SoC 系列编译，符号一律不带后缀字母。
+
+已核实：`package/mtk/drivers/mt_wifi/config.in` 里 `MT7986A` 出现 **0 次**。
+
+> 跟 WF3000A 的规律一致：**DTS 带后缀字母（`mt7981b`），构建符号不带。**
+
+写 `CONFIG_MTK_CHIP_MT7986A=y` 的后果：符号不存在 → `make defconfig`
+**静默丢弃** → conninfra 拿不到芯片宏 → **编译到第 50 分钟才失败**。
+
+## 8.4 MAC 方案（上游原生，不动它）
+
+```sh
+xiaomi,redmi-router-ax6000-stock|\
+xiaomi,redmi-router-ax6000-ubootmod)
+	wan_mac=$(mtd_get_mac_ascii Bdata ethaddr_wan)   # 从 Bdata 读 ASCII
+	label_mac=$wan_mac
+	;;
+```
+
+与 WF3000A 走完全不同的路径（那边是 factory 二进制推算）：
+
+| | 来源 | 分区 |
+|---|---|---|
+| AX6000 | `Bdata` 分区 ASCII 变量 `ethaddr_wan` | Bdata |
+| WF3000A | `factory` 二进制偏移 `0x04` 推算 | factory |
+
+无线 MAC 仍走 `02_network` 尾部的通用兜底 `wan+3` / `wan+4`——
+**对 AX6000 这是正确的**，它的 factory 里未必有规范的无线 MAC。
+（本 fork 只给 WF3000A 单独写了直读逻辑，没有动通用逻辑。）
+
+## 8.5 编译
+
+| 文件 | 路径 |
+|---|---|
+| Workflow | `.github/workflows/build-redmi-ax6000.yml` |
+| 配置 | `defconfig/ax6000-hanwckf-110m.config` |
+
+Actions 页 → **Build Redmi AX6000** → Run workflow。
+
+两个必开项（workflow 第 ④ 步会强制打开、第 ⑤ 步会校验）：
+
+```
+CONFIG_TARGET_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000-ubootmod=y
+CONFIG_TARGET_ROOTFS_INITRAMFS=y
+```
+
+第二条是**硬性要求**：机型定义里 `ARTIFACT/initramfs-factory.ubi` 依赖
+`initramfs-recovery.itb`，而 `ax6000-ubootmod` 块**没有** `ifneq(...INITRAMFS)`
+守卫——不开反而会编译失败。
+
+### 产物
+
+该机型**没有 `factory.bin`**，只有：
+
+```
+*-initramfs-factory.ubi        ← 首次刷入（hanwckf uboot Web 界面直接认）
+*-squashfs-sysupgrade.bin      ← 进系统后再升级
+```
+
+### 驱动
+
+**只能选闭源**。`package/kernel/mt76` 在这份源码里 **404 不存在**
+（`package/mtk/drivers/mt_wifi` 存在），所以 `filogic.mk` 里写的
+`kmod-mt7915e` / `kmod-mt7986-firmware` **全是死引用**，
+必须在 config 里显式写闭源那套：
+
+```
+CONFIG_PACKAGE_kmod-mt_wifi=y
+CONFIG_PACKAGE_kmod-warp=y
+CONFIG_PACKAGE_kmod-conninfra=y
+CONFIG_PACKAGE_wifi-dats=y
+CONFIG_PACKAGE_mtwifi-cfg=y
+```
+
+### ⚠️ 芯片符号块必须抄全（111 项）
+
+这是踩过的坑：conninfra 的 Makefile 把 `CONFIG_MTK_*` 转成 `-D` 宏传给内核模块，
+**只写 5 个 `CONFIG_PACKAGE_kmod-*` 会导致 conninfra 编译失败**。
+
+必须从 `defconfig/mt7986-ax6000.config` 提取整块，关键项：
+
+```
+CONFIG_MTK_CHIP_MT7986=y
+CONFIG_MTK_CONNINFRA_APSOC=y
+CONFIG_MTK_CONNINFRA_APSOC_MT7986=y          ★
+CONFIG_MTK_FIRST_IF_MT7986=y
+CONFIG_MTK_MT7986_NEW_FW=y
+CONFIG_MTK_WIFI_ADIE_TYPE="mt7976"           ← 射频芯片，与 SoC 无关
+CONFIG_MTK_WIFI_SKU_TYPE="AX6000"
+CONFIG_WARP_CHIPSET="mt7986"
+CONFIG_first_card_name="MT7986"
+# CONFIG_MTK_PRE_CAL_TRX_SET1_SUPPORT is not set   ★ 必须连 is not set 一起抄
+# CONFIG_MTK_PRE_CAL_TRX_SET2_SUPPORT is not set
+```
+
+> 这批符号在 `config.in` 里是 `default y`，**不显式关就会被默认打开**。
+> workflow 第 ⑤ 步会提前检查这 13 项，不用等 50 分钟。
+
+## 8.6 刷机
+
+1. 进 hanwckf U-Boot Web 恢复界面
+2. **布局选 `immortalwrt-110m`**（不是 default）
+3. 上传 `*-initramfs-factory.ubi`
+4. 进系统后 `sysupgrade -n *-squashfs-sysupgrade.bin`
+5. 验证：`cat /proc/mtd` → ubi 应为 `06e00000`
+
+> 布局选错会 UBI volume-table 校验失败变砖。
+> 另外 hanwckf 的 bl-mt798x ATF 开了 `CONFIG_ENABLE_NAND_NMBM=y`，
+> 官方主线 ubootmod 不开，两层看到的 flash 大小不同，**不能混刷**。
+
+---
+
+## 九、通用性与参考链接
 
 ### 通用性
 
-**所有 MAC 都从各台机器自己的 factory 分区读取并推算**，
+**所有 MAC 都从各台机器自己的 flash 分区读取并推算**：
+
+| 机型 | 有线来源 | 无线来源 |
+|---|---|---|
+| WF3000A | factory `0x04` 推算 | factory `0x04` / `0x0a` 直读 |
+| AX6000 | Bdata `ethaddr_wan` | 上游通用兜底 `wan+3/+4` |
+
 所以这份源码编译出的固件可以公开分发，不同机器不会撞 MAC。
 
-如果别人要用这个 fork，只需注意：**U-Boot 布局必须选 114m**，
+如果别人要用这个 fork：
+
+- **WF3000A**：U-Boot 布局必须选 **114m**
+- **AX6000**：U-Boot 布局必须选 **immortalwrt-110m**
+
 否则分区对不上起不来。
+
+### 本 fork 新增的文件清单
+
+| 机型 | 文件 | 类型 |
+|---|---|---|
+| WF3000A | `target/linux/mediatek/dts/mt7981b-kst-wf3000a.dts` | 新增 |
+| WF3000A | `target/linux/mediatek/image/filogic.mk` | 末尾追加 |
+| WF3000A | `target/linux/mediatek/filogic/base-files/etc/board.d/02_network` | 插入 2 处 |
+| WF3000A | `target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh` | 插入 1 处 |
+| WF3000A | `package/mtk/applications/mtwifi-cfg/files/mtwifi.sh` | 整文件替换 |
+| **AX6000** | `.github/workflows/build-redmi-ax6000.yml` | **新增** |
+| **AX6000** | `defconfig/ax6000-hanwckf-110m.config` | **新增** |
+
+> AX6000 两文件都是**纯新增**，不触碰任何源码。
 
 ### 参考链接
 
 | 用途 | 地址 |
 |---|---|
-| **构建仓库**（配置 + GitHub Actions） | <https://github.com/wangwang623/KST-WF3000A-ImmortalWrt-6.6> |
+| **WF3000A 构建仓库**（方案 B：padavanonly 源码 + CI 打补丁） | <https://github.com/wangwang623/KST-WF3000A-ImmortalWrt-6.6> |
+| **AX6000 workflow**（在本 fork 内） | `.github/workflows/build-redmi-ax6000.yml` |
 | 本 fork 上游源码 | <https://github.com/padavanonly/immortalwrt-mt798x-6.6> |
-| 多分区 U-Boot（刷机前提） | <https://github.com/VIKINGYFY/UBOOT-CI> |
+| 多分区 U-Boot（WF3000A 刷机前提） | <https://github.com/VIKINGYFY/UBOOT-CI> |
+| hanwckf 项目（AX6000 U-Boot） | <https://github.com/hanwckf> |
 | hanwckf 项目文档 | <https://cmi.hanwckf.top> |
 | ImmortalWrt 官方 | <https://github.com/immortalwrt> |
 
@@ -418,14 +718,21 @@ To build your own firmware you need a GNU/Linux, BSD or macOS system (case sensi
      # MT7981 (generic reference)
      cp -f defconfig/mt7981-ax3000.config .config
 
-     # MT7986
+     # MT7986 (generic reference)
      cp -f defconfig/mt7986-ax6000.config .config
+
+     # Redmi AX6000 with hanwckf U-Boot (110M layout) — in this repo
+     cp -f defconfig/ax6000-hanwckf-110m.config .config
      ```
 
      > For KST WF3000A, use the config from the
      > [build repo](https://github.com/wangwang623/KST-WF3000A-ImmortalWrt-6.6)
      > instead — it selects the proprietary MTK wireless driver
      > (see [section 四](#四无线mtk-闭源驱动)).
+     >
+     > Note: the generic `defconfig/mt798*-*.config` templates are
+     > **MULTI_PROFILE** (all devices of the chip selected at once).
+     > `defconfig/ax6000-hanwckf-110m.config` selects **one** device only.
 
   6. Run `make` to build your firmware. This will download all sources, build the cross-compile toolchain and then cross-compile the GNU/Linux kernel & all chosen applications for your target system.
 
