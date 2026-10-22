@@ -139,8 +139,30 @@ jobs:
           if [ "$DRV" = "mtwifi" ]; then
             chk CONFIG_PACKAGE_kmod-mt_wifi
             chk CONFIG_PACKAGE_mtwifi-cfg
+            chk CONFIG_PACKAGE_kmod-conninfra
+            chk CONFIG_PACKAGE_kmod-warp
           else
             chk CONFIG_PACKAGE_kmod-mt7915e
+          fi
+
+          # ── MT7986 芯片宏 ──
+          # ★ 这几项决定 conninfra / mt_wifi 走哪条芯片代码路径。
+          #   缺失会导致 ERROR: package/mtk/drivers/conninfra failed to build.
+          #   （conninfra 的 Makefile 把它们转成 EXTRA_CFLAGS 传给内核模块）
+          echo "── MT7986 芯片宏 ──"
+          chk CONFIG_MTK_CHIP_MT7986
+          chk CONFIG_MTK_CONNINFRA_APSOC
+          chk CONFIG_MTK_CONNINFRA_APSOC_MT7986
+          chk CONFIG_MTK_FIRST_IF_MT7986
+          chk CONFIG_MTK_MT7986_NEW_FW
+          # 带字符串值的符号单独校验
+          for kv in 'CONFIG_WARP_CHIPSET="mt7986"' 'CONFIG_first_card_name="MT7986"'; do
+            if grep -qx "$kv" .config; then echo "  ✓ $kv";
+            else echo "  ✗ $kv  ← 未生效！"; fail=1; fi
+          done
+          # 反向校验：7981 的芯片宏绝不能出现
+          if grep -qE '^CONFIG_MTK_(CHIP_MT7981|CONNINFRA_APSOC_MT7981|FIRST_IF_MT7981)=' .config; then
+            echo "  ✗ 检测到 MT7981 芯片宏，与 AX6000(MT7986) 冲突！"; fail=1
           fi
 
           if [ "$fail" -ne 0 ]; then
