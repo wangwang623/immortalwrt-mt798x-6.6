@@ -1,0 +1,235 @@
+# ==============================================================================
+# Redmi AX6000 固件编译（hanwckf U-Boot / 110M 大分区）
+#
+# 源码：本仓库自身（wangwang623/immortalwrt-mt798x-6.6）
+# 目标：xiaomi_redmi-router-ax6000-ubootmod
+#
+# 关键事实（已核对源码，非推测）：
+#   padavanonly 的 ax6000-ubootmod DTS 里 ubi = <0x600000 0x6e00000> = 110 MiB
+#   并保留 crash / crash_log、启用 mediatek,nmbm
+#   → 与 hanwckf bl-mt798x U-Boot 的 "immortalwrt-110m" 布局完全一致
+#   → 与官方 OpenWrt 的 ubootmod（0x580000 / 122.5M / 无 nmbm）不是一回事
+#
+# 产物（该机型定义里没有 factory.bin）：
+#   *-initramfs-factory.ubi   ← 首次刷入用这个（U-Boot Web 恢复界面上传）
+#   *-squashfs-sysupgrade.bin ← 进系统后日常升级
+# ==============================================================================
+
+name: Build Redmi AX6000 (hanwckf U-Boot 110M)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '源码分支 / tag / commit SHA'
+        required: false
+        default: 'openwrt-24.10-6.6'
+      config_file:
+        description: '配置文件路径（仓库内相对路径）'
+        required: false
+        default: 'defconfig/ax6000-hanwckf-110m.config'
+      # 本源码只有闭源驱动，不提供 driver 选项（避免误选导致编出无无线固件）
+      # 已核实：package/kernel/mt76 → 404 不存在；package/mtk/drivers/mt_wifi → 200 存在
+      extra_packages:
+        description: '额外软件包（空格分隔，可留空）'
+        required: false
+        default: ''
+      publish_release:
+        description: '发布 Release'
+        type: boolean
+        default: true
+
+  # workflow_call:            # 需要被其它 workflow 调用时取消注释
+  #   inputs: { ... }
+  # schedule:
+  #   - cron: '0 20 * * 0'    # 每周日 UTC 20:00 自动构建
+
+permissions:
+  contents: write
+
+env:
+  TZ: 'Asia/Shanghai'
+  # 必开的 RootFS 类型：
+  #   INITRAMFS —— ax6000-ubootmod 的 initramfs-factory.ubi 依赖 initramfs-recovery.itb
+  #   SQUASHFS  —— sysupgrade.bin 依赖
+  ROOTFS_TYPES: 'initramfs squashfs'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      # ---------------------------------------------------------------- ① 取源码
+      # 本 workflow 就放在源码仓库里，直接构建自身，无需再克隆上游
+      - name: ① 检出源码
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || 'openwrt-24.10-6.6' }}
+          fetch-depth: 1
+
+      # ---------------------------------------------------------------- ② 环境
+      - name: ② 安装编译依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses-dev libssl-dev python3-setuptools rsync \
+            swig unzip zlib1g-dev file wget curl ccache
+          sudo apt-get clean
+
+      - name: ②-b 释放磁盘空间
+        run: |
+          df -h / || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          df -h / || true
+
+      # ---------------------------------------------------------------- ③ feeds
+      # 必须在 make defconfig 之前：LuCI 等包来自 feeds
+      - name: ③ 更新并安装 feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # ---------------------------------------------------------------- ④ 配置
+      - name: ④ 载入配置
+        run: |
+          # || 兜底：schedule 定时触发时 inputs.* 为空
+          CFG="${{ inputs.config_file || 'defconfig/ax6000-hanwckf-110m.config' }}"
+          [ -f "$CFG" ] || { echo "::error::配置文件不存在: $CFG"; exit 1; }
+          cp "$CFG" .config
+
+          # 强制打开 RootFS 类型（AX6000 ubootmod 的 .ubi 产物依赖 initramfs）
+          for t in $ROOTFS_TYPES; do
+            sed -i "s/^# CONFIG_TARGET_ROOTFS_$(echo $t | tr a-z A-Z) is not set/CONFIG_TARGET_ROOTFS_$(echo $t | tr a-z A-Z)=y/" .config
+            grep -q "^CONFIG_TARGET_ROOTFS_$(echo $t | tr a-z A-Z)=" .config || \
+              echo "CONFIG_TARGET_ROOTFS_$(echo $t | tr a-z A-Z)=y" >> .config
+          done
+
+          # 追加额外软件包
+          if [ -n "${{ inputs.extra_packages }}" ]; then
+            for p in ${{ inputs.extra_packages }}; do
+              echo "CONFIG_PACKAGE_$p=y" >> .config
+            done
+          fi
+
+          make defconfig
+          ./scripts/diffconfig.sh > config.buildinfo
+
+      # ---------------------------------------------------------------- ⑤ 校验
+      # 提前暴露"包不存在被静默丢弃" —— 避免编 90 分钟后才发现没无线
+      - name: ⑤ 校验配置（失败即停）
+        run: |
+          fail=0
+          chk() {
+            if grep -qx "$1=y" .config; then echo "  ✓ $1";
+            else echo "  ✗ $1  ← 未生效！"; fail=1; fi
+          }
+          echo "── 目标 ──"
+          chk CONFIG_TARGET_mediatek
+          chk CONFIG_TARGET_mediatek_filogic
+          chk CONFIG_TARGET_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000-ubootmod
+
+          echo "── RootFS ──"
+          chk CONFIG_TARGET_ROOTFS_INITRAMFS
+          chk CONFIG_TARGET_ROOTFS_SQUASHFS
+
+          DRV="mtwifi"       # 本源码唯一可用：闭源 mt_wifi（mt76 不存在，已核实 404）
+          echo "── 无线驱动 ($DRV) ──"
+          if [ "$DRV" = "mtwifi" ]; then
+            chk CONFIG_PACKAGE_kmod-mt_wifi
+            chk CONFIG_PACKAGE_mtwifi-cfg
+          else
+            chk CONFIG_PACKAGE_kmod-mt7915e
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::配置校验未通过。常见原因：机型符号名不对，或所选驱动包在本源码中不存在。"
+            echo "可用机型列表："
+            grep -oE "TARGET_DEVICES \+= [a-zA-Z0-9_-]+" \
+              target/linux/mediatek/image/filogic.mk | grep -i ax6000 || true
+            exit 1
+          fi
+          echo "配置校验全部通过 ✔"
+
+      # ---------------------------------------------------------------- ⑥ 下载
+      - name: ⑥ 下载源码包
+        run: make download -j8
+
+      - name: ⑥-b 校验下载完整性
+        run: |
+          find dl -size -1024c -exec ls -l {} \; -exec rm -f {} \; 2>/dev/null || true
+          make download -j8
+
+      # ---------------------------------------------------------------- ⑦ 编译
+      - name: ⑦ 编译固件
+        id: compile
+        run: |
+          echo "nproc = $(nproc)"
+          make -j$(nproc) || { echo "并行编译失败，改单线程重跑"; make -j1 V=s; }
+
+      - name: ⑦-b 失败时诊断
+        if: failure()
+        run: |
+          echo "── 磁盘 ──"; df -h || true
+          echo "── 各阶段体积 ──"; du -sh build_dir staging_dir dl 2>/dev/null || true
+          echo "── 最近错误行 ──"
+          make -j1 V=s 2>&1 | grep -iE "error|Error [0-9]|No rule to make" | tail -30 || true
+
+      # ---------------------------------------------------------------- ⑧ 收产物
+      - name: ⑧ 收集产物
+        id: collect
+        run: |
+          OUT="$GITHUB_WORKSPACE/firmware"
+          mkdir -p "$OUT"
+          find bin/targets -type f \( \
+              -name '*.ubi' -o -name '*.itb' -o -name '*.bin' \
+              -o -name '*.buildinfo' -o -name '*.manifest' -o -name 'sha256sums' \
+            \) -exec cp -v {} "$OUT"/ \;
+          cp config.buildinfo "$OUT"/ 2>/dev/null || true
+
+          echo "── 产物清单 ──"
+          ls -lh "$OUT"
+
+          # 必查：initramfs-factory.ubi 是 hanwckf U-Boot 首次刷入的关键文件
+          if ! ls "$OUT"/*initramfs-factory.ubi >/dev/null 2>&1; then
+            echo "::error::缺少 initramfs-factory.ubi —— 请确认 CONFIG_TARGET_ROOTFS_INITRAMFS=y 已生效"
+            exit 1
+          fi
+          echo "firmware_dir=$OUT" >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------------- ⑨ 上传
+      - name: ⑨ 上传 Artifacts
+        # v6 起运行在 Node 24，规避 Node 20 弃用告警
+        # 注意：不要写不存在的版本号（如 v7.x 目前未发布），否则本步直接失败
+        uses: actions/upload-artifact@v6
+        with:
+          name: redmi-ax6000-hanwckf-110m
+          path: ${{ steps.collect.outputs.firmware_dir }}/*
+          if-no-files-found: error
+
+      - name: ⑨-b 发布 Release
+        if: ${{ inputs.publish_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ax6000-${{ github.run_number }}
+          name: 'Redmi AX6000 (hanwckf U-Boot 110M) #${{ github.run_number }}'
+          body: |
+            ## Redmi AX6000 · hanwckf U-Boot 110M 布局
+
+            - 机型: `xiaomi_redmi-router-ax6000-ubootmod`
+            - 驱动: `闭源 mt_wifi`（本源码无开源 mt76，已核实）
+            - 源码: `${{ inputs.ref }}` @ `${{ github.sha }}`
+            - 分区: ubi = `0x600000` + `0x6e00000` (110 MiB)，保留 crash/crash_log，启用 nmbm
+
+            ### 刷机顺序
+            1. 进 hanwckf U-Boot Web 恢复界面（断电按住 Reset 上电）
+            2. **布局选 `immortalwrt-110m`**（不是 default）
+            3. 上传 `*-initramfs-factory.ubi` → 开机进入 initramfs
+            4. 在系统内 `sysupgrade -n *-squashfs-sysupgrade.bin`
+
+            ### 验证
+            ```
+            cat /proc/mtd      # ubi 应为 06e00000
+            ```
+          files: ${{ steps.collect.outputs.firmware_dir }}/*
