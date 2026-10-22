@@ -195,6 +195,9 @@ mediatek_setup_macs()
 	local lan_mac=""
 	local wan_mac=""
 	local label_mac=""
+	local base_mac=""
+	local wlan_2g_mac=""
+	local wlan_5g_mac=""
 	local b0dat="$(l1dat if2dat ra0)"
 	local b1dat="$(l1dat if2dat rax0)"
 	case $board in
@@ -244,15 +247,41 @@ mediatek_setup_macs()
 		label_mac=$lan_mac
 		;;
 	kst,wf3000a)
-		# MAC 按 factory 偏移动态推算：每台机器各不相同，不会与他人冲突
-		#   基准 = factory 偏移 0x04（2.4G 无线 MAC，本机 = ...:F7）
-		#   LAN  = 基准 - 1   （本机 = ...:F6）
-		#   WAN  = 基准 - 2   （本机 = ...:F5，与机身标签一致）
-		# 注意：factory 里只有 0x04 / 0x0a 两个无线 MAC，没有 F5，只能推算。
-		base_mac=$(mtd_get_mac_binary factory 4)
-		lan_mac=$(macaddr_add "$base_mac" -1)
-		wan_mac=$(macaddr_add "$base_mac" -2)
-		label_mac=$lan_mac
+		# ── factory 分区里存有两个无线 MAC ──
+		#   偏移 0x04 = 2.4G 无线 MAC（本机 48:DA:35:50:70:F7）
+		#   偏移 0x0a = 5G   无线 MAC（本机 48:DA:35:50:70:F8）
+		# 有线 MAC 以 2.4G MAC 为参照推算，编号与无线连续：
+		#   基准 = 2.4G - 2 = ...:F5  → LAN（= 机身标签地址）
+		#   WAN  = 基准 + 1 = ...:F6
+		# 即 LAN(F5) → WAN(F6) → 2.4G(F7) → 5G(F8) 升序排列。
+		# 每台机器读自己的 flash，固件可公开分发而不与他人冲突。
+		wlan_2g_mac=$(mtd_get_mac_binary factory 4)
+		wlan_5g_mac=$(mtd_get_mac_binary factory 10)
+
+		# 校验：排除空值 / 全 0 / 全 F，读不到就整体回退，绝不写脏值
+		case "$wlan_2g_mac" in
+			""|"00:00:00:00:00:00"|"ff:ff:ff:ff:ff:ff"|"FF:FF:FF:FF:FF:FF")
+				wlan_2g_mac=""; wlan_5g_mac="" ;;
+		esac
+
+		if [ -n "$wlan_2g_mac" ]; then
+			base_mac=$(macaddr_add "$wlan_2g_mac" -2)
+			lan_mac=$base_mac
+			label_mac=$lan_mac
+			wan_mac=$(macaddr_add "$base_mac" 1)
+		fi
+
+		# ── 抢先把无线 MAC 写进 .dat profile，阻断尾部的 base+3/+4 ──
+		# 尾部逻辑是 base_mac+3 / +4，沿用会算出 F9 / FA（2.4G 显示 F9 的根因）。
+		# 这里先写入正确值，尾部的 `! grep -q "MacAddress="` 守卫就会跳过。
+		if [ -n "$wlan_2g_mac" ] && [ -f "$b0dat" ] \
+		   && ! grep -q "MacAddress=" "$b0dat"; then
+			echo "MacAddress=$wlan_2g_mac" >> "$b0dat"
+		fi
+		if [ -n "$wlan_5g_mac" ] && [ -f "$b1dat" ] \
+		   && ! grep -q "MacAddress=" "$b1dat"; then
+			echo "MacAddress=$wlan_5g_mac" >> "$b1dat"
+		fi
 		;;
 	qihoo,360t7)
 		lan_mac=$(mtd_get_mac_ascii factory lanMac)
