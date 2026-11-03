@@ -219,6 +219,12 @@
 		spi-rx-bus-width = <4>;
 
 		mediatek,nmbm;
+		/* NMBM-FIX: 内核 6.6 把 W25N01KV 的 oobsize 报成 96，而 U-Boot
+		   写 NMBM 签名时用的是 64，导致内核 nmbm_attach() 报
+		   "NMBM configuration mismatch" 并回退到 spi0.0 物理层。
+		   下面这行把内核侧 oobsize 对齐到签名值，使内核与 U-Boot
+		   共用同一张 NMBM 映射表（上游 OpenWrt 的标准修法）。 */
+		mediatek,bmt-mtd-overridden-oobsize = <64>;
 		mediatek,bmt-max-ratio = <1>;
 		mediatek,bmt-max-reserved-blocks = <64>;
 
