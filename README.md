@@ -54,7 +54,7 @@
 | 项目 | KST WF3000A | Redmi AX6000 |
 |---|---|---|
 | SoC | MediaTek MT7981B（双核 A53 @ 1.3GHz） | MT7986 |
-| 内存 | 256 MB | — |
+| 内存 | 256 MB | 512MB |
 | Flash | **128 MB SPI-NAND（Winbond W25N01KV，带 NMBM）** | 128 MB SPI-NAND（ESMT） |
 | 无线 | MT7976，2.4G + 5G 双频 AX3000 | MT7976 |
 | 本工程布局 | **114M（expand）** | 按本仓库对应机型定义 |
