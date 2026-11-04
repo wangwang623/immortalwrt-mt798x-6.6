@@ -3,11 +3,31 @@
 基于 [padavanonly/immortalwrt-mt798x-6.6](https://github.com/padavanonly/immortalwrt-mt798x-6.6) 的 **fork 源码仓库**。
 机型移植改动已直接写进源码，可直接用 GitHub Actions 云编译，**不需要在 CI 里跑查找/替换补丁脚本**。
 
-> ✅ **已内置 NMBM oobsize 对齐修复**（`mediatek,bmt-mtd-overridden-oobsize = <64>`）。
+> ✅ **WF3000A 的 DTS 已内置 NMBM oobsize 对齐修复**（`mediatek,bmt-mtd-overridden-oobsize = <64>`）。
 > 它解决的是「同一份固件、同一份 U-Boot、同样的刷法，有的机器正常，有的机器刷完反复重启或一直停在 U-Boot Web」的问题。
 > 详见下文「NMBM / oobsize 对齐修复」章节，**首次编译前建议通读一遍**。
 
-固件定位：**纯净**。官方默认包 + LuCI（中文）+ HNAT 硬件加速 + MTK 无线驱动/固件，不含第三方插件；需要什么刷完自己 `opkg install`。
+### 两个机型、两套配置
+
+| | KST WF3000A | Redmi AX6000 |
+|---|---|---|
+| Workflow | `.github/workflows/build-kst-wf3000a.yml` | `.github/workflows/build-redmi-ax6000.yml` |
+| 默认 config | `defconfig/wf3000a.config` | `defconfig/ax6000-hanwckf-110m.config` |
+| 固件定位 | 官方默认包 + LuCI 中文 + HNAT 硬件加速 + MTK 无线驱动/固件，**内置 `zram-swap`（`kmod-zram` + LZ4，按 64M 使用）**，除此之外不含第三方插件 | 基础包之外**另含 `zram-swap`**（`kmod-zram` + LZ4）、`luci-app-mtwifi-cfg`、`datconf` 等 |
+
+> ⚠️ **两个机型都已内置 `zram-swap`**，刷完不要重复 `opkg install zram-swap`；`kmod-zram` 随固件编入，也不能事后 `opkg install`。
+> 依据：`defconfig/wf3000a.config` **第 364–379 行**、`defconfig/ax6000-hanwckf-110m.config` **第 199–206 行**都写着 `CONFIG_PACKAGE_kmod-zram=y` / `CONFIG_PACKAGE_zram-swap=y` / `CONFIG_ZRAM_DEF_COMP_LZ4=y` 三行（本仓库 `defconfig/mt7986-ax6000.config` 同样带 `zram-swap`）。想要不带 zram 的固件，删掉对应 config 里这三行再编译；换 config 前先 `grep zram` 确认目标文件。实际包清单以各自 `defconfig/*.config` 为准。
+>
+> **容量与算法由 `zram.init` 读 UCI，不由 defconfig 固化**：`defconfig` 只负责把包编进去、并把内核默认压缩算法设为 LZ4；运行时的容量取 `system.@system[0].zram_size_mb`（未设时按内存自动算，256MB 机器约 128MB），算法取 `system.@system[0].zram_comp_algo`（未设时脚本默认 `lzo`）。WF3000A 按 **64M + LZ4** 使用，刷完可显式固定：
+>
+> ```sh
+> uci set system.@system[0].zram_size_mb=64
+> uci set system.@system[0].zram_comp_algo=lz4
+> uci commit system
+> /etc/init.d/zram restart
+> ```
+>
+> 验证：`/etc/init.d/zram status`（显示 Device size 与 Compression algo）。
 
 ---
 
@@ -69,14 +89,14 @@ DTS 里 `ubi` 为 `0x07200000`，`IMAGE_SIZE` 比它少约 1 MiB，留给 UBI �
 | ③ | `target/linux/mediatek/filogic/base-files/etc/board.d/02_network` | 新增 `kst,wf3000a)` 分支，从 factory 推导 LAN/WAN MAC |
 | ④ | `target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh` | 新增机型，支持 sysupgrade |
 | ⑤ | `package/mtk/applications/mtwifi-cfg/files/mtwifi.sh` | 整文件替换，生成无线配置时按 factory 偏移写 MAC |
-| ⑥ | `config/wf3000a.config` | 构建配置（意图清单），显式打开 MTK 闭源无线包 |
+| ⑥ | `defconfig/wf3000a.config` | 构建配置（意图清单），显式打开 MTK 闭源无线包 |
 
 自查（任选其一，能确认改动在源码里）：
 
 ```bash
 grep -n "kst,wf3000a" target/linux/mediatek/image/filogic.mk
 grep -n "mediatek,bmt-mtd-overridden-oobsize" target/linux/mediatek/dts/mt7981b-kst-wf3000a.dts
-grep -n "kmod-mt_wifi" config/wf3000a.config
+grep -n "kmod-mt_wifi" defconfig/wf3000a.config
 grep -n "kst,wf3000a" target/linux/mediatek/filogic/base-files/etc/board.d/02_network
 ```
 
@@ -282,7 +302,7 @@ spi-nand: ESMT / FORESEE ... OOB size: 64                → 不用加
 ## 六、云编译
 
 1. 本仓库 → **Settings → Actions → General → Workflow permissions** 勾 **Read and write**。
-2. **Actions → 对应构建 workflow → Run workflow**，填写输入项（源码分支/commit、是否发布 Release 等，以 workflow 实际输入框为准）。
+2. **Actions → 对应构建 workflow → Run workflow**（WF3000A 用 `build-kst-wf3000a.yml`，AX6000 用 `build-redmi-ax6000.yml`），填写输入项（源码分支/commit、是否发布 Release、`config_file` 等，以 workflow 实际输入框为准）。
 3. 等 1～2 小时，产物在 **Artifacts** / Release。
 
 产物文件名带 `kst_wf3000a` 即说明选对了机型：
@@ -407,7 +427,7 @@ mtwifi_factory_mac() {
 | `wifi-dats` | `package/mtk/drivers/wifi-profile` | mt7981 profile(.dat) |
 | `mtwifi-cfg` | `package/mtk/applications/mtwifi-cfg` | 无线配置工具 |
 
-**无线不会自动带出来**：`filogic/target.mk` 的 `DEFAULT_PACKAGES` 和各机型 `DEVICE_PACKAGES` 都没有它，必须在 `config/wf3000a.config` 里显式写 `=y`。
+**无线不会自动带出来**：`filogic/target.mk` 的 `DEFAULT_PACKAGES` 和各机型 `DEVICE_PACKAGES` 都没有它，必须在 `defconfig/wf3000a.config` 里显式写 `=y`。
 
 ### 闭源驱动的固有行为（不是 bug）
 
@@ -429,7 +449,7 @@ CONFIG_PACKAGE_luci=y
 
 ### ⚠️ 唯一例外：MTK 驱动符号必须连 `is not set` 一起抄
 
-`config/wf3000a.config` 里的 **MTK 驱动符号块**逐行照抄源码自带的 `defconfig/mt7981-ax3000.config`，**包括 `# CONFIG_X is not set` 行**。这批符号在 `mt_wifi/config.in` 里是 `default y`，不显式禁用就会被默认打开，曾导致：
+`defconfig/wf3000a.config` 里的 **MTK 驱动符号块**逐行照抄源码自带的 `defconfig/mt7981-ax3000.config`，**包括 `# CONFIG_X is not set` 行**。这批符号在 `mt_wifi/config.in` 里是 `default y`，不显式禁用就会被默认打开，曾导致：
 
 ```text
 eeprom.c:508  error: 'PRE_CAL_SIZE_ONE_CARD' undeclared
@@ -452,7 +472,9 @@ ERROR: package/mtk/drivers/mt_wifi failed to build.
 
 > `luci-ssl` 是**入站** HTTPS（浏览器 → 管理页），`ca-bundle` 是**出站** HTTPS（路由器 → 软件源），方向相反。本工程保留 `ca-bundle`、省略 `luci-ssl`。
 
-以后装插件：`opkg update && opkg install luci-app-upnp luci-app-ddns luci-app-wol luci-app-package-manager zram-swap`。带 `kmod-*` 的包必须重新编译后刷入。
+以后装插件（两个机型通用）：`opkg update && opkg install luci-app-upnp luci-app-ddns luci-app-wol luci-app-package-manager`。带 `kmod-*` 的包必须重新编译后刷入。
+
+> **两个机型都已内置 `zram-swap`**（见文首「两个机型、两套配置」），**不要**再把它加进 `opkg install` 列表，也不要试图事后装 `kmod-zram`。
 
 ---
 
@@ -488,7 +510,7 @@ make -j$(nproc)
 - PATH 和工作目录**不能有空格或非 ASCII 字符**
 - 至少 4GB 内存、25GB 磁盘，需联网；Debian 11 + AMD64 优先
 - WSL 下需移除 PATH 中的 Windows 目录
-- 若用本仓库（fork）编译，直接把 `config/wf3000a.config` 拷成 `.config`
+- 若用本仓库（fork）编译，直接把 `defconfig/wf3000a.config` 拷成 `.config`
 
 ---
 
@@ -508,8 +530,9 @@ make -j$(nproc)
 | | Anser-y | 恩山「小圆」 | **本仓库** |
 |---|---|---|---|
 | Flash 布局 | 大分区 | 114M（另有大分区变体） | **114M（单一）** |
-| 插件 | 大量 | 较多 | **无（纯净）** |
+| 插件 | 大量 | 较多 | **WF3000A：仅内置 `zram-swap`，无其它第三方插件** |
 | MAC | 硬编码 | 随机（DTS 缺 nvmem-cells） | **每台机器各自推导** |
 | NMBM oobsize | 未处理 | 未处理 | **已对齐** |
 
+> 该对比针对 **WF3000A**。AX6000 默认 config 另含 `luci-app-mtwifi-cfg`、`datconf` 等，且同样内置 `zram-swap`，见文首「两个机型、两套配置」。
 > ⚠️ Anser-y 那份 config 里没有任何无线配置，不能作为「无线正常」的参照物。
