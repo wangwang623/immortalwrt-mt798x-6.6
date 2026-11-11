@@ -55,4 +55,4 @@ dmesg | grep -iE 'mt_wifi|warp|conninfra'        # 无线驱动已加载
 | 5.4 编译工程 / 源码 | https://github.com/wangwang623/immortalwrt-hanwckf-firmware-build · https://github.com/wangwang623/immortalwrt-mt798x |
 | U-Boot 预编译 / 源码 | https://github.com/VIKINGYFY/UBOOT-CI · https://github.com/Yuzhii0718/bl-mt798x-dhcpd |
 | 项目介绍 / AX3000T 教程 | https://cmi.hanwckf.top/p/immortalwrt-mt798x/ · https://okhk.net/xiaomi-ax3000t-router-with-hanwckf-immortalwrt |
-| 旧仓库（索引页，勿叠加使用） | https://github.com/wangwang623/KST-WF3000A-ImmortalWrt-6.6 |
+| 旧仓库（索引页，勿叠加使用） | https://github.com/wangwang623/KST-WF3000A-ImmortalWrt |
