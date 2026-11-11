@@ -6,7 +6,7 @@
  * 本文件相对 Anser-y 原版只改了两处（均可搜 "CHANGED" 定位）：
  *   1) model / compatible 描述里的 248MiB -> 114MiB（纯文字，无功能影响）
  *   2) ubi 分区 reg 长度 0x0f280000 -> 0x07200000
- *   3) 在 factory 分区里补了一个 MAC 的 nvmem cell，并把 gmac0/gmac1 指向它
+ *   3) 在 factory 分区里补了一个 MAC 的 nvmem cell，并把 gmac0 指向它
  *      —— 这是修「MAC 地址随机」的关键，原版 DTS 完全没有这段
  *   4) factory 分区改用 nvmem-layout，并给 &wifi 补上 nvmem-cells 指向
  *      eeprom@0（校准数据）—— 与上游 6.6 源码里其它 MT7981 机型写法一致。
@@ -18,6 +18,21 @@
  *      hexdump -C /dev/mtd2 | head -20    # (mtd2 换成实际的 factory)
  *    找到形如 xx:xx:xx:xx:xx:xx 连续排列的 6 字节，记下它的起始偏移，
  *    若你的机器实测到不同偏移，把 reg = <0x4 0x6> 里的 0x4 换掉。
+ *
+
+ * ── 网口拓扑：单 GMAC（2026-11 梳理）──────────────────────────────
+ *   硬件只把 MT7531 的 port6 接到 SoC gmac0，没有第二条 CPU 链路。
+ *   交换端口左→右：port0=lan1 / port1=lan2 / port2=lan3 / port3=wan。
+ *   02_network 中 kst,wf3000a 与 cetron,ct3003 / qihoo,360t7 同组，
+ *   用 DSA 的 "lan1 lan2 lan3" + "wan"，不依赖 eth1。
+ *   因此 &eth 只定义 gmac0；旧版多写的 gmac1: mac@1 没有接任何 CPU
+ *   port，会生成一个无链路的 eth1，已删除。
+ *
+ *   &hnat 的 mtketh-wan / mtketh-ppd 在本源码 hnat.c 里只检查属性存在，
+ *   值被无条件覆盖为 "eth0"（hnat.c 698-713）；mtketh-max-gmac=<2> 是
+ *   驱动内部 gmac_num 标志（IS_GMAC1_MODE=(gmac_num==1)），决定 HQOS / DSA
+ *   转发分支，与 DTS 声明了几个 mac@ 无关。两者维持已实机验证的取值，
+ *   不要因为改成单 GMAC 就顺手改成 1 —— 那会切换 hnat 转发路径。
  *
  * 分区校验：0x0580000 + 0x07200000 = 0x07780000 = 119.5 MiB，
  * 与 hanwckf 系 U-Boot 的 expand(114m) 布局
@@ -33,7 +48,7 @@
  * 即 factory 里只有两个无线 MAC（F7 = 2.4G，F8 = 5G），
  * 以太网 MAC（F5 = LAN，F6 = WAN）不在这个分区里。
  *
- * 所以本文件里 gmac 绑定的 0x4 只能让内核先拿到一个「本机合法但不等于标签」
+ * 所以本文件里 gmac0 绑定的 0x4 只能让内核先拿到一个「本机合法但不等于标签」
  * 的 MAC（F7）。最终 LAN/WAN 的 MAC 由 02_network 决定（会覆盖这里的值），
  * 建议按 02_network.snippet.txt 的「方案 A」硬编码成 F5 / F6。
  */
@@ -118,31 +133,12 @@
 			pause;
 		};
 	};
-
-	gmac1: mac@1 {
-		compatible = "mediatek,eth-mac";
-		reg = <1>;
-		phy-mode = "2500base-x";
-
-		fixed-link {
-			speed = <2500>;
-			full-duplex;
-			pause;
-		};
-	};
 };
 
 /* CHANGED: 新增 —— 给以太网口绑定 factory 里的 MAC，根治「MAC 随机」 */
 &gmac0 {
 	nvmem-cells = <&macaddr_factory_4>;
 	nvmem-cell-names = "mac-address";
-};
-
-&gmac1 {
-	nvmem-cells = <&macaddr_factory_4>;
-	nvmem-cell-names = "mac-address";
-	/* WAN 通常用 label_mac + 1；若你希望 WAN 与 LAN 同 MAC，删掉下面这行 */
-	mac-address-increment = <1>;
 };
 
 &mdio_bus {
@@ -196,6 +192,7 @@
 	};
 };
 
+/* 单 GMAC；属性含义见文件头注释，取值保持已实机验证的状态 */
 &hnat {
 	mtketh-wan = "eth1";
 	mtketh-lan = "lan";
