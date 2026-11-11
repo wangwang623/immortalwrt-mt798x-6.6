@@ -17,17 +17,6 @@ name: Build KST-WF3000A ImmortalWrt 6.6
 
 on:
   workflow_dispatch:
-    inputs:
-      source_ref:
-        description: '源码引用（分支名或 commit sha）'
-        required: true
-        type: string
-        default: openwrt-24.10-6.6
-      publish_release:
-        description: Publish firmware as a GitHub Release
-        required: true
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -87,7 +76,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/wf3000a-build"
           git init -q "$RUNNER_TEMP/wf3000a-build/openwrt"
           git -C "$RUNNER_TEMP/wf3000a-build/openwrt" remote add origin "$SOURCE_REPO"
-          git -C "$RUNNER_TEMP/wf3000a-build/openwrt" fetch --depth=1 origin "${{ inputs.source_ref }}"
+          git -C "$RUNNER_TEMP/wf3000a-build/openwrt" fetch --depth=1 origin "openwrt-24.10-6.6"
           git -C "$RUNNER_TEMP/wf3000a-build/openwrt" checkout --detach FETCH_HEAD
           echo "OPENWRT=$RUNNER_TEMP/wf3000a-build/openwrt" >> "$GITHUB_ENV"
           echo "fetched: $(git -C "$RUNNER_TEMP/wf3000a-build/openwrt" rev-parse HEAD)"
@@ -209,78 +198,59 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # ── 8. ★ 无线校验 ②：配置是否被 defconfig 静默丢弃 ──────
+      # ── 8. ★ 校验：最小完整系统（硬中止）+ 可后装/可选（软警告）──
+      #    只查主包；依赖由 make defconfig 自动解析，不检查「不该有哪些包」。
       - name: Load and validate configuration
         working-directory: ${{ runner.temp }}/wf3000a-build/openwrt
         run: |
           cp "$GITHUB_WORKSPACE/defconfig/wf3000a.config" .config
           make defconfig
 
-          fail() {
-            echo "::error::make defconfig 后缺少必需项: $*" >&2
-            echo "── .config 中实际存在的无线相关行 ──" >&2
-            grep -E "^(CONFIG_MTK_|CONFIG_CONNINFRA_|CONFIG_WARP_|CONFIG_first_card|CONFIG_PACKAGE_(kmod-mt_wifi|kmod-warp|kmod-conninfra|wifi-dats|mtwifi))" .config >&2 || true
-            exit 1
-          }
-
-          # 包：缺一个就会编出「没有 WiFi 的固件」
-          for symbol in \
-            CONFIG_TARGET_mediatek_filogic_DEVICE_kst_wf3000a \
-            CONFIG_PACKAGE_kmod-mediatek_hnat \
-            CONFIG_PACKAGE_luci \
-            CONFIG_LUCI_LANG_zh_Hans \
-            CONFIG_PACKAGE_kmod-mt_wifi \
-            CONFIG_PACKAGE_kmod-warp \
-            CONFIG_PACKAGE_kmod-conninfra \
-            CONFIG_PACKAGE_wifi-dats \
-            CONFIG_PACKAGE_mtwifi-cfg \
-            CONFIG_PACKAGE_wifi-scripts ; do
-            grep -qx "${symbol}=y" .config || fail "$symbol"
+          # 硬：基本系统主包 + 源码内 Makefile 可查的依赖，缺任一中止
+          HARD=(
+            CONFIG_TARGET_mediatek_filogic_DEVICE_kst_wf3000a
+            CONFIG_PACKAGE_kmod-mt_wifi
+            CONFIG_PACKAGE_kmod-mediatek_hnat
+            CONFIG_PACKAGE_kmod-conninfra
+            CONFIG_PACKAGE_kmod-warp
+            CONFIG_PACKAGE_wifi-dats
+            CONFIG_PACKAGE_mtwifi-cfg
+            CONFIG_PACKAGE_iwinfo
+            CONFIG_PACKAGE_datconf-lua
+            CONFIG_PACKAGE_luci
+            CONFIG_PACKAGE_opkg
+            CONFIG_PACKAGE_zram-swap
+            CONFIG_PACKAGE_kmod-zram
+            CONFIG_PACKAGE_kmod-lib-lzo
+            CONFIG_PACKAGE_kmod-crypto-acompress
+          )
+          # 硬：驱动开关（缺了会编出无 WiFi 或编译失败）
+          HARD_KV=(
+            'CONFIG_MTK_CHIP_MT7981=y'
+            'CONFIG_MTK_FIRST_IF_MT7981=y'
+            'CONFIG_MTK_WIFI_DRIVER=y'
+            'CONFIG_MTK_WIFI_FW_BIN_LOAD=y'
+            'CONFIG_MTK_MT7981_NEW_FW=y'
+            'CONFIG_first_card_name="MT7981"'
+          )
+          # 软：中文 / Argon / lz4 主包，缺了只警告，不阻断
+          SOFT=(
+            CONFIG_PACKAGE_luci-i18n-base-zh-cn
+            CONFIG_PACKAGE_luci-theme-argon
+            CONFIG_PACKAGE_kmod-lib-lz4
+          )
+          fail=0
+          for s in "${HARD[@]}"; do
+            grep -qx "${s}=y" .config || { echo "::error::缺少必需项 ${s}" >&2; fail=1; }
           done
-
-          # 驱动开关：带值校验（缺了同样不报错，只是没无线）
-          for kv in \
-            'CONFIG_MTK_CHIP_MT7981=y' \
-            'CONFIG_MTK_FIRST_IF_MT7981=y' \
-            'CONFIG_MTK_WIFI_DRIVER=y' \
-            'CONFIG_MTK_WIFI_FW_BIN_LOAD=y' \
-            'CONFIG_MTK_MT7981_NEW_FW=y' \
-            'CONFIG_first_card_name="MT7981"' ; do
-            grep -qxF "$kv" .config || fail "$kv"
+          for kv in "${HARD_KV[@]}"; do
+            grep -qxF "$kv" .config || { echo "::error::缺少必需项 ${kv}" >&2; fail=1; }
           done
-
-          # 三态符号：=m 或 =y 都算通过，避免上游改值导致误报
-          for sym in CONFIG_MTK_MT_WIFI CONFIG_MTK_MT_AP_SUPPORT CONFIG_MTK_WIFI_MODE_AP; do
-            grep -qxF "${sym}=m" .config || grep -qxF "${sym}=y" .config || fail "$sym (m/y)"
+          [ "$fail" -eq 0 ] || { ./scripts/diffconfig.sh >&2; exit 1; }
+          echo "[OK] 硬校验通过（15 主包/依赖 + 6 驱动开关）"
+          for s in "${SOFT[@]}"; do
+            grep -qx "${s}=y" .config || echo "::warning::${s} 未选中（可后装/可选，继续编译）"
           done
-          echo "硬校验通过：机型 / HNAT / LuCI / 中文 / MTK 无线驱动 均已选中"
-
-          # 双名组（24.10 改名的包，两个名字有其一即通过）
-          check_renamed() {
-            local label="$1"; shift
-            for symbol in "$@"; do
-              grep -qx "${symbol}=y" .config && { echo "双名组 OK：$label → $symbol"; return; }
-            done
-            echo "::error::$label 新旧名字都未生效（$*）" >&2; exit 1
-          }
-          check_renamed "LuCI 软件包页面" \
-            CONFIG_PACKAGE_luci-app-package-manager CONFIG_PACKAGE_luci-app-opkg
-          check_renamed "软件包页面中文化" \
-            CONFIG_PACKAGE_luci-i18n-package-manager-zh-cn CONFIG_PACKAGE_luci-i18n-opkg-zh-cn
-
-          # 软校验：缺了不致命，只提醒
-          for symbol in \
-            CONFIG_PACKAGE_opkg \
-            CONFIG_PACKAGE_ca-bundle \
-            CONFIG_PACKAGE_ca-certificates \
-            CONFIG_PACKAGE_libustream-openssl \
-            CONFIG_PACKAGE_luci-app-firewall \
-            CONFIG_PACKAGE_kmod-nft-offload \
-            CONFIG_PACKAGE_ppp-mod-pppoe ; do
-            grep -qx "${symbol}=y" .config \
-              || echo "::warning::$symbol 未选中（opkg 可能无法访问 https 源，届时改用 http 源）"
-          done
-
           ./scripts/diffconfig.sh | tee "$GITHUB_WORKSPACE/build.diffconfig"
 
       # ── 9. 预下载源码包 ───────────────────────────────────
@@ -391,14 +361,13 @@ jobs:
           retention-days: 30
 
       - name: Publish GitHub Release
-        if: ${{ inputs.publish_release }}
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.collect.outputs.release_tag }}
           name: WF3000A ImmortalWrt 6.6 ${{ steps.collect.outputs.release_tag }}
           body: |
             Source: wangwang623/immortalwrt-mt798x-6.6 (fork of padavanonly)
-            Ref: ${{ inputs.source_ref }}
+            Ref: openwrt-24.10-6.6
             Layout: nmbm0:1024k(bl2),512k(u-boot-env),2048k(factory),2048k(fip),116736k(ubi)
             MAC: LAN=48:da:35:50:70:f5  WAN=48:da:35:50:70:f6
             Wireless: MTK 闭源驱动 kmod-mt_wifi + kmod-warp + kmod-conninfra + wifi-dats

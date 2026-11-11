@@ -19,25 +19,6 @@ name: Build Redmi AX6000 (hanwckf U-Boot 110M)
 
 on:
   workflow_dispatch:
-    inputs:
-      ref:
-        description: '源码分支 / tag / commit SHA'
-        required: false
-        default: 'openwrt-24.10-6.6'
-      config_file:
-        description: '配置文件路径（仓库内相对路径）'
-        required: false
-        default: 'defconfig/ax6000-hanwckf-110m.config'
-      # 本源码只有闭源驱动，不提供 driver 选项（避免误选导致编出无无线固件）
-      # 已核实：package/kernel/mt76 → 404 不存在；package/mtk/drivers/mt_wifi → 200 存在
-      extra_packages:
-        description: '额外软件包（空格分隔，可留空）'
-        required: false
-        default: ''
-      publish_release:
-        description: '发布 Release'
-        type: boolean
-        default: true
 
   # workflow_call:            # 需要被其它 workflow 调用时取消注释
   #   inputs: { ... }
@@ -64,7 +45,7 @@ jobs:
       - name: ① 检出源码
         uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.ref || 'openwrt-24.10-6.6' }}
+          ref: openwrt-24.10-6.6
           fetch-depth: 1
 
       # ---------------------------------------------------------------- ② 环境
@@ -94,8 +75,7 @@ jobs:
       # ---------------------------------------------------------------- ④ 配置
       - name: ④ 载入配置
         run: |
-          # || 兜底：schedule 定时触发时 inputs.* 为空
-          CFG="${{ inputs.config_file || 'defconfig/ax6000-hanwckf-110m.config' }}"
+          CFG="defconfig/ax6000-hanwckf-110m.config"
           [ -f "$CFG" ] || { echo "::error::配置文件不存在: $CFG"; exit 1; }
           cp "$CFG" .config
 
@@ -106,73 +86,70 @@ jobs:
               echo "CONFIG_TARGET_ROOTFS_$(echo $t | tr a-z A-Z)=y" >> .config
           done
 
-          # 追加额外软件包
-          if [ -n "${{ inputs.extra_packages }}" ]; then
-            for p in ${{ inputs.extra_packages }}; do
-              echo "CONFIG_PACKAGE_$p=y" >> .config
-            done
-          fi
-
           make defconfig
           ./scripts/diffconfig.sh > config.buildinfo
 
       # ---------------------------------------------------------------- ⑤ 校验
-      # 提前暴露"包不存在被静默丢弃" —— 避免编 90 分钟后才发现没无线
-      - name: ⑤ 校验配置（失败即停）
+      - name: ⑤ 校验配置（硬中止 / 软警告）
         run: |
+          # 硬：目标 / RootFS / 最小系统主包与依赖 / MT7986 芯片宏
+          HARD=(
+            CONFIG_TARGET_mediatek
+            CONFIG_TARGET_mediatek_filogic
+            CONFIG_TARGET_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000-ubootmod
+            CONFIG_TARGET_ROOTFS_INITRAMFS
+            CONFIG_TARGET_ROOTFS_SQUASHFS
+            CONFIG_PACKAGE_kmod-mt_wifi
+            CONFIG_PACKAGE_kmod-mediatek_hnat
+            CONFIG_PACKAGE_kmod-conninfra
+            CONFIG_PACKAGE_kmod-warp
+            CONFIG_PACKAGE_wifi-dats
+            CONFIG_PACKAGE_mtwifi-cfg
+            CONFIG_PACKAGE_iwinfo
+            CONFIG_PACKAGE_datconf-lua
+            CONFIG_PACKAGE_luci
+            CONFIG_PACKAGE_opkg
+            CONFIG_PACKAGE_zram-swap
+            CONFIG_PACKAGE_kmod-zram
+            CONFIG_PACKAGE_kmod-lib-lzo
+            CONFIG_PACKAGE_kmod-crypto-acompress
+            CONFIG_MTK_CHIP_MT7986
+            CONFIG_MTK_CONNINFRA_APSOC
+            CONFIG_MTK_CONNINFRA_APSOC_MT7986
+            CONFIG_MTK_FIRST_IF_MT7986
+            CONFIG_MTK_MT7986_NEW_FW
+          )
+          HARD_KV=(
+            'CONFIG_WARP_CHIPSET="mt7986"'
+            'CONFIG_first_card_name="MT7986"'
+          )
+          # 软：中文 / Argon / lz4 主包，缺了只警告，继续编译
+          SOFT=(
+            CONFIG_PACKAGE_luci-i18n-base-zh-cn
+            CONFIG_PACKAGE_luci-theme-argon
+            CONFIG_PACKAGE_kmod-lib-lz4
+          )
           fail=0
-          chk() {
-            if grep -qx "$1=y" .config; then echo "  ✓ $1";
-            else echo "  ✗ $1  ← 未生效！"; fail=1; fi
-          }
-          echo "── 目标 ──"
-          chk CONFIG_TARGET_mediatek
-          chk CONFIG_TARGET_mediatek_filogic
-          chk CONFIG_TARGET_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000-ubootmod
-
-          echo "── RootFS ──"
-          chk CONFIG_TARGET_ROOTFS_INITRAMFS
-          chk CONFIG_TARGET_ROOTFS_SQUASHFS
-
-          DRV="mtwifi"       # 本源码唯一可用：闭源 mt_wifi（mt76 不存在，已核实 404）
-          echo "── 无线驱动 ($DRV) ──"
-          if [ "$DRV" = "mtwifi" ]; then
-            chk CONFIG_PACKAGE_kmod-mt_wifi
-            chk CONFIG_PACKAGE_mtwifi-cfg
-            chk CONFIG_PACKAGE_kmod-conninfra
-            chk CONFIG_PACKAGE_kmod-warp
-          else
-            chk CONFIG_PACKAGE_kmod-mt7915e
-          fi
-
-          # ── MT7986 芯片宏 ──
-          # ★ 这几项决定 conninfra / mt_wifi 走哪条芯片代码路径。
-          #   缺失会导致 ERROR: package/mtk/drivers/conninfra failed to build.
-          #   （conninfra 的 Makefile 把它们转成 EXTRA_CFLAGS 传给内核模块）
-          echo "── MT7986 芯片宏 ──"
-          chk CONFIG_MTK_CHIP_MT7986
-          chk CONFIG_MTK_CONNINFRA_APSOC
-          chk CONFIG_MTK_CONNINFRA_APSOC_MT7986
-          chk CONFIG_MTK_FIRST_IF_MT7986
-          chk CONFIG_MTK_MT7986_NEW_FW
-          # 带字符串值的符号单独校验
-          for kv in 'CONFIG_WARP_CHIPSET="mt7986"' 'CONFIG_first_card_name="MT7986"'; do
-            if grep -qx "$kv" .config; then echo "  ✓ $kv";
-            else echo "  ✗ $kv  ← 未生效！"; fail=1; fi
+          for s in "${HARD[@]}"; do
+            grep -qx "${s}=y" .config || { echo "  ✗ ${s}  ← 未生效！"; fail=1; }
           done
-          # 反向校验：7981 的芯片宏绝不能出现
+          for kv in "${HARD_KV[@]}"; do
+            grep -qxF "$kv" .config || { echo "  ✗ ${kv}  ← 未生效！"; fail=1; }
+          done
+          # 反向：7981 芯片宏绝不出现
           if grep -qE '^CONFIG_MTK_(CHIP_MT7981|CONNINFRA_APSOC_MT7981|FIRST_IF_MT7981)=' .config; then
             echo "  ✗ 检测到 MT7981 芯片宏，与 AX6000(MT7986) 冲突！"; fail=1
           fi
-
-          if [ "$fail" -ne 0 ]; then
-            echo "::error::配置校验未通过。常见原因：机型符号名不对，或所选驱动包在本源码中不存在。"
-            echo "可用机型列表："
+          [ "$fail" -eq 0 ] || {
+            echo "::error::配置校验未通过（机型符号或驱动包在源码中不存在）"
             grep -oE "TARGET_DEVICES \+= [a-zA-Z0-9_-]+" \
               target/linux/mediatek/image/filogic.mk | grep -i ax6000 || true
             exit 1
-          fi
-          echo "配置校验全部通过 ✔"
+          }
+          echo "[OK] 硬校验通过"
+          for s in "${SOFT[@]}"; do
+            grep -qx "${s}=y" .config || echo "::warning::${s} 未选中（可后装/可选，继续编译）"
+          done
 
       # ---------------------------------------------------------------- ⑥ 下载
       - name: ⑥ 下载源码包
@@ -231,7 +208,6 @@ jobs:
           if-no-files-found: error
 
       - name: ⑨-b 发布 Release
-        if: ${{ inputs.publish_release }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ax6000-${{ github.run_number }}
@@ -241,7 +217,7 @@ jobs:
 
             - 机型: `xiaomi_redmi-router-ax6000-ubootmod`
             - 驱动: `闭源 mt_wifi`（本源码无开源 mt76，已核实）
-            - 源码: `${{ inputs.ref }}` @ `${{ github.sha }}`
+            - 源码: `openwrt-24.10-6.6` @ `${{ github.sha }}`
             - 分区: ubi = `0x600000` + `0x6e00000` (110 MiB)，保留 crash/crash_log，启用 nmbm
 
             ### 刷机顺序
