@@ -31,7 +31,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
 
     steps:
@@ -50,7 +50,8 @@ jobs:
           sudo apt-get -qq clean
           df -hT
 
-      # ── 3. 装编译依赖 ─────────────────────────────────────
+      # ── 3. 装编译依赖（Ubuntu 24.04 LTS）───────────────────
+      #    24.04 已移除 python3-distutils，由 python3-setuptools 提供 distutils。
       - name: Install build dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -65,7 +66,8 @@ jobs:
             libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool \
             libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano ninja-build \
             p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply \
-            python3-docutils python3-pyelftools qemu-utils re2c rsync scons \
+            python3-setuptools python3-docutils python3-pyelftools qemu-utils \
+            re2c rsync scons \
             squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim \
             wget xmlto xxd zlib1g-dev zstd
           sudo timedatectl set-timezone "$TZ"
