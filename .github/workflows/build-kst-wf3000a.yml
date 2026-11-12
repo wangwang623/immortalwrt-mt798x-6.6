@@ -197,22 +197,23 @@ jobs:
       - name: Update and install feeds
         working-directory: ${{ runner.temp }}/wf3000a-build/openwrt
         run: |
-          # 兜底：若仓库仍残留旧版自定义 uci-defaults，清掉以免与
-          # package/emortal/default-settings 的 99-default-settings 撞路径。
+          # 兜底：幂等清理历史残留的自定义 uci-defaults（99 / zz），
+          # 它们会与 package/emortal/default-settings 提供的 99-default-settings
+          # 撞路径，导致 package/install 失败。默认值沿用源码基线，不注入。
           rm -f target/linux/mediatek/filogic/base-files/etc/uci-defaults/99-default-settings \
                 target/linux/mediatek/filogic/base-files/etc/uci-defaults/zz-custom-settings
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       # ── 8. ★ 校验：最小完整系统（硬中止）+ 可后装/可选（软警告）──
-      #    主包 + 当前源码可查的一层包依赖全部显式 =y；二层依赖由 defconfig 展开。
+      #    主包 + 直接依赖全部显式 =y；硬缺中止 / 软缺警告；二层依赖由 defconfig 展开。
       - name: Load and validate configuration
         working-directory: ${{ runner.temp }}/wf3000a-build/openwrt
         run: |
           cp "$GITHUB_WORKSPACE/defconfig/wf3000a.config" .config
           make defconfig
 
-          # 硬：基本系统主包 + 可查的一层包依赖，缺任一中止
+          # 硬：21 项基本系统主包 + 直接依赖，缺任一中止
           HARD=(
             CONFIG_TARGET_mediatek_filogic_DEVICE_kst_wf3000a
             CONFIG_PACKAGE_kmod-mt_wifi
@@ -236,35 +237,6 @@ jobs:
             CONFIG_PACKAGE_mtwifi-cfg
             CONFIG_PACKAGE_iwinfo
             CONFIG_PACKAGE_datconf-lua
-            CONFIG_PACKAGE_lua-cjson
-            CONFIG_PACKAGE_libiwinfo
-            CONFIG_PACKAGE_libiwinfo-data
-            CONFIG_PACKAGE_libnl-tiny
-            CONFIG_PACKAGE_libuci
-            CONFIG_PACKAGE_libubus
-            CONFIG_PACKAGE_luci-app-firewall
-            CONFIG_PACKAGE_luci-mod-admin-full
-            CONFIG_PACKAGE_luci-proto-ppp
-            CONFIG_PACKAGE_luci-theme-bootstrap
-            CONFIG_PACKAGE_rpcd-mod-rrdns
-            CONFIG_PACKAGE_uhttpd
-            CONFIG_PACKAGE_uhttpd-mod-ubus
-            CONFIG_PACKAGE_luci-base
-            CONFIG_PACKAGE_rpcd
-            CONFIG_PACKAGE_rpcd-mod-file
-            CONFIG_PACKAGE_rpcd-mod-luci
-            CONFIG_PACKAGE_rpcd-mod-ucode
-            CONFIG_PACKAGE_cgi-io
-            CONFIG_PACKAGE_ucode
-            CONFIG_PACKAGE_ucode-mod-fs
-            CONFIG_PACKAGE_ucode-mod-uci
-            CONFIG_PACKAGE_ucode-mod-ubus
-            CONFIG_PACKAGE_ucode-mod-math
-            CONFIG_PACKAGE_ucode-mod-html
-            CONFIG_PACKAGE_liblucihttp-ucode
-            CONFIG_PACKAGE_datconf
-            CONFIG_PACKAGE_liblua
-            CONFIG_PACKAGE_libkvcutil
           )
           # 硬：驱动开关（缺了会编出无 WiFi 或编译失败）
           HARD_KV=(
@@ -275,7 +247,7 @@ jobs:
             'CONFIG_MTK_MT7981_NEW_FW=y'
             'CONFIG_first_card_name="MT7981"'
           )
-          # 软：中文 / Argon / lz4 / TurboACC 主包，缺了只警告，继续编译
+          # 软：中文 / Argon / lz4 / TurboACC 主包，缺了只警告，不阻断
           SOFT=(
             CONFIG_PACKAGE_luci-i18n-base-zh-cn
             CONFIG_PACKAGE_luci-theme-argon
@@ -290,7 +262,7 @@ jobs:
             grep -qxF "$kv" .config || { echo "::error::缺少必需项 ${kv}" >&2; fail=1; }
           done
           [ "$fail" -eq 0 ] || { ./scripts/diffconfig.sh >&2; exit 1; }
-          echo "[OK] 硬校验通过（最小系统主包/依赖 + 机型 + 驱动开关）"
+          echo "[OK] 硬校验通过（21 主包/依赖 + 1 机型 + 6 驱动开关）"
           for s in "${SOFT[@]}"; do
             grep -qx "${s}=y" .config || echo "::warning::${s} 未选中（可后装/可选，继续编译）"
           done
