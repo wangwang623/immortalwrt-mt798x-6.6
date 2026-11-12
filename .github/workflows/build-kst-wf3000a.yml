@@ -197,34 +197,45 @@ jobs:
       - name: Update and install feeds
         working-directory: ${{ runner.temp }}/wf3000a-build/openwrt
         run: |
+          # 清理上传残留：target/base-files 里的 99-default-settings 与
+          # package/emortal/default-settings 提供的同名文件冲突，会让
+          # package/install 失败。默认设置已由 zz-custom-settings 提供。
+          rm -f target/linux/mediatek/filogic/base-files/etc/uci-defaults/99-default-settings
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       # ── 8. ★ 校验：最小完整系统（硬中止）+ 可后装/可选（软警告）──
-      #    只查主包；依赖由 make defconfig 自动解析，不检查「不该有哪些包」。
+      #    主包 + 直接依赖全部显式 =y；硬缺中止 / 软缺警告；二层依赖由 defconfig 展开。
       - name: Load and validate configuration
         working-directory: ${{ runner.temp }}/wf3000a-build/openwrt
         run: |
           cp "$GITHUB_WORKSPACE/defconfig/wf3000a.config" .config
           make defconfig
 
-          # 硬：基本系统主包 + 源码内 Makefile 可查的依赖，缺任一中止
+          # 硬：21 项基本系统主包 + 直接依赖，缺任一中止
           HARD=(
             CONFIG_TARGET_mediatek_filogic_DEVICE_kst_wf3000a
             CONFIG_PACKAGE_kmod-mt_wifi
             CONFIG_PACKAGE_kmod-mediatek_hnat
-            CONFIG_PACKAGE_kmod-conninfra
-            CONFIG_PACKAGE_kmod-warp
-            CONFIG_PACKAGE_wifi-dats
-            CONFIG_PACKAGE_mtwifi-cfg
-            CONFIG_PACKAGE_iwinfo
-            CONFIG_PACKAGE_datconf-lua
             CONFIG_PACKAGE_luci
             CONFIG_PACKAGE_opkg
             CONFIG_PACKAGE_zram-swap
-            CONFIG_PACKAGE_kmod-zram
             CONFIG_PACKAGE_kmod-lib-lzo
+            CONFIG_PACKAGE_wifi-dats
+            CONFIG_PACKAGE_kmod-conninfra
+            CONFIG_PACKAGE_kmod-warp
+            CONFIG_PACKAGE_kmod-nf-conntrack
+            CONFIG_PACKAGE_wireless-tools
+            CONFIG_PACKAGE_luci-light
+            CONFIG_PACKAGE_luci-app-package-manager
+            CONFIG_PACKAGE_uclient-fetch
+            CONFIG_PACKAGE_libpthread
+            CONFIG_PACKAGE_libubox
+            CONFIG_PACKAGE_kmod-zram
             CONFIG_PACKAGE_kmod-crypto-acompress
+            CONFIG_PACKAGE_mtwifi-cfg
+            CONFIG_PACKAGE_iwinfo
+            CONFIG_PACKAGE_datconf-lua
           )
           # 硬：驱动开关（缺了会编出无 WiFi 或编译失败）
           HARD_KV=(
@@ -249,7 +260,7 @@ jobs:
             grep -qxF "$kv" .config || { echo "::error::缺少必需项 ${kv}" >&2; fail=1; }
           done
           [ "$fail" -eq 0 ] || { ./scripts/diffconfig.sh >&2; exit 1; }
-          echo "[OK] 硬校验通过（15 主包/依赖 + 6 驱动开关）"
+          echo "[OK] 硬校验通过（21 主包/依赖 + 1 机型 + 6 驱动开关）"
           for s in "${SOFT[@]}"; do
             grep -qx "${s}=y" .config || echo "::warning::${s} 未选中（可后装/可选，继续编译）"
           done

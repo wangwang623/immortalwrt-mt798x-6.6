@@ -69,6 +69,10 @@ jobs:
       # 必须在 make defconfig 之前：LuCI 等包来自 feeds
       - name: ③ 更新并安装 feeds
         run: |
+          # 清理上传残留：target/base-files 里的 99-default-settings 与
+          # package/emortal/default-settings 提供的同名文件冲突，会让
+          # package/install 失败。默认设置已由 zz-custom-settings 提供。
+          rm -f target/linux/mediatek/filogic/base-files/etc/uci-defaults/99-default-settings
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
@@ -92,7 +96,7 @@ jobs:
       # ---------------------------------------------------------------- ⑤ 校验
       - name: ⑤ 校验配置（硬中止 / 软警告）
         run: |
-          # 硬：目标 / RootFS / 最小系统主包与依赖 / MT7986 芯片宏
+          # 硬：目标 / RootFS / 21 项最小系统主包与直接依赖 / MT7986 芯片宏
           HARD=(
             CONFIG_TARGET_mediatek
             CONFIG_TARGET_mediatek_filogic
@@ -101,18 +105,25 @@ jobs:
             CONFIG_TARGET_ROOTFS_SQUASHFS
             CONFIG_PACKAGE_kmod-mt_wifi
             CONFIG_PACKAGE_kmod-mediatek_hnat
-            CONFIG_PACKAGE_kmod-conninfra
-            CONFIG_PACKAGE_kmod-warp
-            CONFIG_PACKAGE_wifi-dats
-            CONFIG_PACKAGE_mtwifi-cfg
-            CONFIG_PACKAGE_iwinfo
-            CONFIG_PACKAGE_datconf-lua
             CONFIG_PACKAGE_luci
             CONFIG_PACKAGE_opkg
             CONFIG_PACKAGE_zram-swap
-            CONFIG_PACKAGE_kmod-zram
             CONFIG_PACKAGE_kmod-lib-lzo
+            CONFIG_PACKAGE_wifi-dats
+            CONFIG_PACKAGE_kmod-conninfra
+            CONFIG_PACKAGE_kmod-warp
+            CONFIG_PACKAGE_kmod-nf-conntrack
+            CONFIG_PACKAGE_wireless-tools
+            CONFIG_PACKAGE_luci-light
+            CONFIG_PACKAGE_luci-app-package-manager
+            CONFIG_PACKAGE_uclient-fetch
+            CONFIG_PACKAGE_libpthread
+            CONFIG_PACKAGE_libubox
+            CONFIG_PACKAGE_kmod-zram
             CONFIG_PACKAGE_kmod-crypto-acompress
+            CONFIG_PACKAGE_mtwifi-cfg
+            CONFIG_PACKAGE_iwinfo
+            CONFIG_PACKAGE_datconf-lua
             CONFIG_MTK_CHIP_MT7986
             CONFIG_MTK_CONNINFRA_APSOC
             CONFIG_MTK_CONNINFRA_APSOC_MT7986
